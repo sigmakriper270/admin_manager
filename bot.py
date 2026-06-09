@@ -201,29 +201,21 @@ async def adminlist(interaction: discord.Interaction):
 # ── /roleslist ────────────────────────────────────────────────────────────────
 @bot.tree.command(name="roleslist", description="Показать все доступные SCP роли", guild=guild_obj)
 async def roleslist(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
-        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
         return
-    data = await send_command("roles")
-    if not data["ok"]:
-        await interaction.followup.send(f"❌ {data['message']}", ephemeral=True)
+    raw   = os.getenv("AVAILABLE_ROLES", "")
+    roles = [r.strip() for r in raw.split(",") if r.strip()]
+    if not roles:
+        await interaction.response.send_message("⚠️ AVAILABLE_ROLES не задан.", ephemeral=True)
         return
-    try:
-        roles = json.loads(data["message"])
-    except Exception:
-        roles = []
-    lines = []
-    for r in roles:
-        badge = r.get("badge", "")
-        name  = r.get("role", "")
-        lines.append(f"• `{name}` — {badge}" if badge else f"• `{name}`")
     embed = discord.Embed(
         title="📋 Доступные SCP роли",
-        description="\n".join(lines) or "—",
+        description="\n".join(f"• `{r}`" for r in roles) or "—",
         color=discord.Color.green()
-    )  
-    await interaction.followup.send(embed=embed, ephemeral=True)
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 # ── /rolesadd ─────────────────────────────────────────────────────────────────
 @bot.tree.command(name="rolesadd", description="Выдать Discord роли по SCP роли игрока", guild=guild_obj)
