@@ -1,6 +1,11 @@
 """
-AdminManager Discord Bot — WebSocket + HTTP на одном порту через aiohttp
+AdminManager Discord Bot — HTTP polling на aiohttp
 Хостинг: Render.com (Web Service)
+
+Схема:
+  Плагин каждые 2 сек  →  GET  /poll    — забирает команду (или 204)
+  Плагин               →  POST /result  — возвращает результат
+  Discord slash cmd    →  send_command() → кладёт в очередь, ждёт Future
 """
 
 import os
@@ -17,7 +22,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from aiohttp import web
-import aiohttp
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("AdminBot")
@@ -26,76 +30,77 @@ log = logging.getLogger("AdminBot")
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 GUILD_ID      = int(os.environ["GUILD_ID"])
 API_TOKEN     = os.environ["API_TOKEN"]
-WS_PORT       = int(os.getenv("PORT", "8080"))
+HTTP_PORT     = int(os.getenv("PORT", "8080"))
 
 _raw = os.getenv("ALLOWED_ROLES", "")
 ALLOWED_ROLE_IDS: list[int] = [int(x) for x in _raw.split(",") if x.strip()]
 
-RESPONSE_TIMEOUT = 15
+RESPONSE_TIMEOUT = 20   # сек — плагин опрашивает каждые 2 сек, 20 хватит
 # ─────────────────────────────────────────────────────────────────────────────
 
-plugin_ws: Optional[web.WebSocketResponse] = None
-pending: dict[str, asyncio.Future] = {}
+# Очередь команд для плагина: каждый элемент — dict {id, action, steamid, role}
+_queue: asyncio.Queue = asyncio.Queue()
+
+# reqId -> Future[dict] — ждём ответ от плагина
+_pending: dict[str, asyncio.Future] = {}
 
 
-# ── aiohttp WebSocket handler ─────────────────────────────────────────────────
-async def ws_handler(request: web.Request) -> web.WebSocketResponse:
-    global plugin_ws
-
+# ── Проверка токена ───────────────────────────────────────────────────────────
+def _check_auth(request: web.Request):
     auth = request.headers.get("Authorization", "")
     if auth != f"Bearer {API_TOKEN}":
         raise web.HTTPUnauthorized(text="Unauthorized")
 
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
 
-    plugin_ws = ws
-    log.info(f"WS: плагин подключился с {request.remote}")
-
+# ── GET /poll  (плагин забирает команду) ─────────────────────────────────────
+async def handle_poll(request: web.Request) -> web.Response:
+    _check_auth(request)
     try:
-        async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                try:
-                    data   = json.loads(msg.data)
-                    req_id = data.get("id")
-                    if req_id and req_id in pending:
-                        pending[req_id].set_result(data)
-                except Exception as e:
-                    log.error(f"WS: ошибка разбора ответа: {e}")
-            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
-                break
-    finally:
-        if plugin_ws is ws:
-            plugin_ws = None
-        log.info("WS: плагин отключился")
-
-    return ws
+        cmd = _queue.get_nowait()
+        log.info(f"POLL → отдал команду: {cmd['action']} {cmd.get('steamid','')}")
+        return web.json_response(cmd)
+    except asyncio.QueueEmpty:
+        return web.Response(status=204)  # нет команд — плагин ждёт 2 сек и снова
 
 
-async def send_to_plugin(action: str, **kwargs) -> dict:
-    if plugin_ws is None or plugin_ws.closed:
-        return {"ok": False, "message": "⚠️ Плагин не подключён (сервер SCP выключен?)"}
+# ── POST /result  (плагин возвращает результат) ──────────────────────────────
+async def handle_result(request: web.Request) -> web.Response:
+    _check_auth(request)
+    data   = await request.json()
+    req_id = data.get("id")
+    ok_str = "OK" if data.get("ok") else "ERR"
+    log.info(f"RESULT ← {req_id}: {ok_str}: {data.get('message','')}")
 
-    req_id = uuid.uuid4().hex[:12]
-    future: asyncio.Future = asyncio.get_running_loop().create_future()
-    pending[req_id] = future
+    if req_id and req_id in _pending:
+        fut = _pending.pop(req_id)
+        if not fut.done():
+            fut.set_result(data)
 
-    payload = {"id": req_id, "action": action, **kwargs}
-    try:
-        await plugin_ws.send_str(json.dumps(payload))
-        result = await asyncio.wait_for(future, timeout=RESPONSE_TIMEOUT)
-        return result
-    except asyncio.TimeoutError:
-        return {"ok": False, "message": "⚠️ Плагин не ответил (таймаут)"}
-    except Exception as e:
-        return {"ok": False, "message": f"Ошибка: {e}"}
-    finally:
-        pending.pop(req_id, None)
+    return web.json_response({"ok": True})
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
-async def health(request: web.Request) -> web.Response:
-    return web.Response(text="OK")
+async def handle_health(request: web.Request) -> web.Response:
+    queued = _queue.qsize()
+    waiting = len(_pending)
+    return web.Response(text=f"OK | queued={queued} waiting={waiting}")
+
+
+# ── Отправить команду плагину и дождаться ответа ─────────────────────────────
+async def send_command(action: str, steamid: str = "", role: str = "") -> dict:
+    req_id = uuid.uuid4().hex[:12]
+    loop   = asyncio.get_running_loop()
+    fut    = loop.create_future()
+    _pending[req_id] = fut
+
+    await _queue.put({"id": req_id, "action": action, "steamid": steamid, "role": role})
+    log.info(f"CMD queued: {action} {steamid} [{req_id}]")
+
+    try:
+        return await asyncio.wait_for(fut, timeout=RESPONSE_TIMEOUT)
+    except asyncio.TimeoutError:
+        _pending.pop(req_id, None)
+        return {"ok": False, "message": "⚠️ Плагин не ответил (таймаут). Сервер SCP запущен?"}
 
 
 # ── Discord бот ───────────────────────────────────────────────────────────────
@@ -115,8 +120,9 @@ def has_permission(interaction: discord.Interaction) -> bool:
 async def adminadd(interaction: discord.Interaction, steamid: str, role: str):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
-        await interaction.followup.send("❌ Нет прав.", ephemeral=True); return
-    data = await send_to_plugin("add", steamid=steamid, role=role)
+        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        return
+    data = await send_command("add", steamid=steamid, role=role)
     await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
     if data["ok"]:
         await _log(interaction, f"🛡 **{interaction.user}** выдал роль `{role}` → `{steamid}`")
@@ -127,8 +133,9 @@ async def adminadd(interaction: discord.Interaction, steamid: str, role: str):
 async def adminremove(interaction: discord.Interaction, steamid: str):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
-        await interaction.followup.send("❌ Нет прав.", ephemeral=True); return
-    data = await send_to_plugin("remove", steamid=steamid)
+        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        return
+    data = await send_command("remove", steamid=steamid)
     await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
     if data["ok"]:
         await _log(interaction, f"🚫 **{interaction.user}** убрал роль у `{steamid}`")
@@ -138,16 +145,19 @@ async def adminremove(interaction: discord.Interaction, steamid: str):
 async def adminlist(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
-        await interaction.followup.send("❌ Нет прав.", ephemeral=True); return
-    data = await send_to_plugin("list")
+        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        return
+    data = await send_command("list")
     if not data["ok"]:
-        await interaction.followup.send(f"❌ {data['message']}", ephemeral=True); return
+        await interaction.followup.send(f"❌ {data['message']}", ephemeral=True)
+        return
     try:
         admins = json.loads(data["message"])
     except Exception:
         admins = []
     if not admins:
-        await interaction.followup.send("Список пуст.", ephemeral=True); return
+        await interaction.followup.send("Список пуст.", ephemeral=True)
+        return
     lines = []
     for entry in admins:
         if ":" in entry:
@@ -176,18 +186,19 @@ async def on_ready():
 
 # ── Запуск ────────────────────────────────────────────────────────────────────
 async def main():
-    # aiohttp приложение: и WS и health check на одном порту
     app = web.Application()
-    app.router.add_get("/ws", ws_handler)       # WebSocket endpoint
-    app.router.add_get("/", health)             # health check GET
+    app.router.add_get("/poll",    handle_poll)
+    app.router.add_post("/result", handle_result)
+    app.router.add_get("/",        handle_health)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", WS_PORT)
+    site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
     await site.start()
-    log.info(f"HTTP+WS сервер слушает порт {WS_PORT}")
+    log.info(f"HTTP сервер слушает порт {HTTP_PORT}")
 
     async with bot:
         await bot.start(DISCORD_TOKEN)
+
 
 asyncio.run(main())
