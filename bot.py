@@ -198,6 +198,28 @@ async def adminlist(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+# ── /roleslist ────────────────────────────────────────────────────────────────
+@bot.tree.command(name="roleslist", description="Показать все доступные SCP роли", guild=guild_obj)
+async def roleslist(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not has_permission(interaction):
+        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        return
+    data = await send_command("roles")
+    if not data["ok"]:
+        await interaction.followup.send(f"❌ {data['message']}", ephemeral=True)
+        return
+    try:
+        roles = json.loads(data["message"])
+    except Exception:
+        roles = []
+    embed = discord.Embed(
+        title="📋 Доступные SCP роли",
+        description="\n".join(f"• `{r}`" for r in roles) or "—",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
 # ── /rolesadd ─────────────────────────────────────────────────────────────────
 @bot.tree.command(name="rolesadd", description="Выдать Discord роли по SCP роли игрока", guild=guild_obj)
 @app_commands.describe(
