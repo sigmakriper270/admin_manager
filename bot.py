@@ -46,18 +46,29 @@ _pending: dict[str, asyncio.Future] = {}
 # Формат: { "Admin": [123456789, 987654321], "Moderator": [111222333] }
 
 def _load_rolemap() -> dict[str, list[int]]:
+    raw = os.getenv("ROLEMAP_JSON", "{}")
     try:
-        with open(ROLEMAP_FILE, "r") as f:
-            return json.load(f)
+        return json.loads(raw)
     except Exception:
         return {}
 
 def _save_rolemap(data: dict[str, list[int]]):
+    import urllib.request
+    render_token  = os.getenv("RENDER_API_KEY", "")
+    render_svc_id = os.getenv("RENDER_SERVICE_ID", "")
+    if not render_token or not render_svc_id:
+        log.warning("RENDER_API_KEY или RENDER_SERVICE_ID не заданы — rolemap сбросится при перезапуске!")
+        return
+    payload = json.dumps({"value": json.dumps(data)}).encode()
+    url = f"https://api.render.com/v1/services/{render_svc_id}/env-vars/ROLEMAP_JSON"
+    req = urllib.request.Request(url, data=payload, method="PUT")
+    req.add_header("Authorization", f"Bearer {render_token}")
+    req.add_header("Content-Type", "application/json")
     try:
-        with open(ROLEMAP_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        urllib.request.urlopen(req, timeout=10)
+        log.info("rolemap сохранён в Render env.")
     except Exception as e:
-        log.error(f"Не удалось сохранить rolemap: {e}")
+        log.error(f"Не удалось сохранить rolemap в Render: {e}")
       
 rolemap: dict[str, list[int]] = _load_rolemap()
 
