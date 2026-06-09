@@ -213,11 +213,16 @@ async def roleslist(interaction: discord.Interaction):
         roles = json.loads(data["message"])
     except Exception:
         roles = []
+    lines = []
+    for r in roles:
+        badge = r.get("badge", "")
+        name  = r.get("role", "")
+        lines.append(f"• `{name}` — {badge}" if badge else f"• `{name}`")
     embed = discord.Embed(
         title="📋 Доступные SCP роли",
-        description="\n".join(f"• `{r}`" for r in roles) or "—",
+        description="\n".join(lines) or "—",
         color=discord.Color.green()
-    )
+    )  
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ── /rolesadd ─────────────────────────────────────────────────────────────────
