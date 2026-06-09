@@ -1,9 +1,6 @@
 """
-AdminManager Discord Bot — WebSocket сервер
+AdminManager Discord Bot — WebSocket + HTTP на одном порту через aiohttp
 Хостинг: Render.com (Web Service)
-Плагин сам подключается к боту при старте сервера SCP.
-
-Зависимости: pip install discord.py websockets
 """
 
 import os
@@ -14,83 +11,71 @@ import uuid
 import logging
 from typing import Optional
 
-# Отключаем буферизацию — логи видны в реальном времени на Render
 sys.stdout.reconfigure(line_buffering=True)
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-import websockets
-from websockets.asyncio.server import ServerConnection, serve
-from websockets.http11 import Request, Response
-from websockets.datastructures import Headers
+from aiohttp import web
+import aiohttp
+import websockets.connection
+from websockets.asyncio.server import ServerConnection
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("AdminBot")
 
-# ── Настройки (Environment Variables на Render) ───────────────────────────────
+# ── Настройки ─────────────────────────────────────────────────────────────────
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 GUILD_ID      = int(os.environ["GUILD_ID"])
-API_TOKEN     = os.environ["API_TOKEN"]           # совпадает с api_token в Config.yml плагина
-WS_PORT       = int(os.getenv("PORT", "8080"))    # Render сам задаёт PORT
+API_TOKEN     = os.environ["API_TOKEN"]
+WS_PORT       = int(os.getenv("PORT", "8080"))
 
 _raw = os.getenv("ALLOWED_ROLES", "")
 ALLOWED_ROLE_IDS: list[int] = [int(x) for x in _raw.split(",") if x.strip()]
 
-RESPONSE_TIMEOUT = 15  # секунд ждём ответ от плагина
+RESPONSE_TIMEOUT = 15
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Активное WS соединение с плагином (только одно)
-plugin_ws: Optional[ServerConnection] = None
-
-# Ожидающие ответа: {req_id: asyncio.Future}
+plugin_ws: Optional[web.WebSocketResponse] = None
 pending: dict[str, asyncio.Future] = {}
 
 
-# ── Health check — отвечает на HEAD/GET от Render до WS handshake ─────────────
-async def health_check(connection: ServerConnection, request: Request) -> Optional[Response]:
-    if request.method in ("HEAD", "GET"):
-        body = b"OK"
-        headers = Headers([
-            ("Content-Type", "text/plain"),
-            ("Content-Length", str(len(body))),
-        ])
-        return Response(200, "OK", headers, body)
-    return None  # продолжить WS handshake
-
-
-# ── WebSocket сервер ──────────────────────────────────────────────────────────
-async def ws_handler(ws: ServerConnection):
+# ── aiohttp WebSocket handler ─────────────────────────────────────────────────
+async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     global plugin_ws
 
-    # Проверка токена
-    auth = ws.request.headers.get("Authorization", "")
+    auth = request.headers.get("Authorization", "")
     if auth != f"Bearer {API_TOKEN}":
-        await ws.close(1008, "Unauthorized")
-        log.warning("WS: отклонено соединение — неверный токен")
-        return
+        raise web.HTTPUnauthorized(text="Unauthorized")
+
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
 
     plugin_ws = ws
-    log.info(f"WS: плагин подключился с {ws.remote_address}")
+    log.info(f"WS: плагин подключился с {request.remote}")
 
     try:
-        async for message in ws:
-            try:
-                data   = json.loads(message)
-                req_id = data.get("id")
-                if req_id and req_id in pending:
-                    pending[req_id].set_result(data)
-            except Exception as e:
-                log.error(f"WS: ошибка разбора ответа: {e}")
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data   = json.loads(msg.data)
+                    req_id = data.get("id")
+                    if req_id and req_id in pending:
+                        pending[req_id].set_result(data)
+                except Exception as e:
+                    log.error(f"WS: ошибка разбора ответа: {e}")
+            elif msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                break
     finally:
         if plugin_ws is ws:
             plugin_ws = None
         log.info("WS: плагин отключился")
 
+    return ws
+
 
 async def send_to_plugin(action: str, **kwargs) -> dict:
-    """Отправляет команду плагину и ждёт ответа."""
-    if plugin_ws is None:
+    if plugin_ws is None or plugin_ws.closed:
         return {"ok": False, "message": "⚠️ Плагин не подключён (сервер SCP выключен?)"}
 
     req_id = uuid.uuid4().hex[:12]
@@ -99,7 +84,7 @@ async def send_to_plugin(action: str, **kwargs) -> dict:
 
     payload = {"id": req_id, "action": action, **kwargs}
     try:
-        await plugin_ws.send(json.dumps(payload))
+        await plugin_ws.send_str(json.dumps(payload))
         result = await asyncio.wait_for(future, timeout=RESPONSE_TIMEOUT)
         return result
     except asyncio.TimeoutError:
@@ -108,6 +93,11 @@ async def send_to_plugin(action: str, **kwargs) -> dict:
         return {"ok": False, "message": f"Ошибка: {e}"}
     finally:
         pending.pop(req_id, None)
+
+
+# ── Health check ──────────────────────────────────────────────────────────────
+async def health(request: web.Request) -> web.Response:
+    return web.Response(text="OK")
 
 
 # ── Discord бот ───────────────────────────────────────────────────────────────
@@ -128,7 +118,6 @@ async def adminadd(interaction: discord.Interaction, steamid: str, role: str):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
         await interaction.followup.send("❌ Нет прав.", ephemeral=True); return
-
     data = await send_to_plugin("add", steamid=steamid, role=role)
     await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
     if data["ok"]:
@@ -141,7 +130,6 @@ async def adminremove(interaction: discord.Interaction, steamid: str):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
         await interaction.followup.send("❌ Нет прав.", ephemeral=True); return
-
     data = await send_to_plugin("remove", steamid=steamid)
     await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
     if data["ok"]:
@@ -153,25 +141,20 @@ async def adminlist(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
         await interaction.followup.send("❌ Нет прав.", ephemeral=True); return
-
     data = await send_to_plugin("list")
     if not data["ok"]:
         await interaction.followup.send(f"❌ {data['message']}", ephemeral=True); return
-
     try:
         admins = json.loads(data["message"])
     except Exception:
         admins = []
-
     if not admins:
         await interaction.followup.send("Список пуст.", ephemeral=True); return
-
     lines = []
     for entry in admins:
         if ":" in entry:
             sid, role = entry.split(":", 1)
             lines.append(f"`{sid.strip()}` — **{role.strip()}**")
-
     embed = discord.Embed(
         title=f"🛡 Администраторы ({len(lines)})",
         description="\n".join(lines) or "—",
@@ -193,15 +176,21 @@ async def on_ready():
     log.info(f"Discord: запущен как {bot.user}")
 
 
-# ── Запуск обоих серверов вместе ──────────────────────────────────────────────
+# ── Запуск ────────────────────────────────────────────────────────────────────
 async def main():
-    ws_server = await serve(ws_handler, "0.0.0.0", WS_PORT, process_request=health_check)
-    log.info(f"WS сервер слушает порт {WS_PORT}")
+    # aiohttp приложение: и WS и health check на одном порту
+    app = web.Application()
+    app.router.add_get("/ws", ws_handler)       # WebSocket endpoint
+    app.router.add_get("/", health)             # health check GET
+    app.router.add_route("HEAD", "/", health)   # health check HEAD
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WS_PORT)
+    await site.start()
+    log.info(f"HTTP+WS сервер слушает порт {WS_PORT}")
 
     async with bot:
-        await asyncio.gather(
-            bot.start(DISCORD_TOKEN),
-            ws_server.wait_closed(),
-        )
+        await bot.start(DISCORD_TOKEN)
 
 asyncio.run(main())
