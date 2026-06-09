@@ -7,17 +7,21 @@ AdminManager Discord Bot — WebSocket сервер
 """
 
 import os
+import sys
 import json
 import asyncio
 import uuid
 import logging
 from typing import Optional
 
+# Отключаем буферизацию — логи видны в реальном времени на Render
+sys.stdout.reconfigure(line_buffering=True)
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 import websockets
-from websockets.asyncio.server import ServerConnection
+from websockets.asyncio.server import ServerConnection, serve
 from websockets.http11 import Request, Response
 from websockets.datastructures import Headers
 
@@ -43,10 +47,9 @@ plugin_ws: Optional[ServerConnection] = None
 pending: dict[str, asyncio.Future] = {}
 
 
-# ── Health check (перехватывает HEAD/GET от Render до WS handshake) ───────────
+# ── Health check — отвечает на HEAD/GET от Render до WS handshake ─────────────
 async def health_check(connection: ServerConnection, request: Request) -> Optional[Response]:
-    """Отвечает 200 OK на HEAD/GET запросы — для Render health checks."""
-    if request.method in ("HEAD", "GET") and request.path in ("/", "/health"):
+    if request.method in ("HEAD", "GET"):
         body = b"OK"
         headers = Headers([
             ("Content-Type", "text/plain"),
@@ -73,7 +76,7 @@ async def ws_handler(ws: ServerConnection):
     try:
         async for message in ws:
             try:
-                data  = json.loads(message)
+                data   = json.loads(message)
                 req_id = data.get("id")
                 if req_id and req_id in pending:
                     pending[req_id].set_result(data)
@@ -192,7 +195,7 @@ async def on_ready():
 
 # ── Запуск обоих серверов вместе ──────────────────────────────────────────────
 async def main():
-    ws_server = await websockets.serve(ws_handler, "0.0.0.0", WS_PORT, process_request=health_check)
+    ws_server = await serve(ws_handler, "0.0.0.0", WS_PORT, process_request=health_check)
     log.info(f"WS сервер слушает порт {WS_PORT}")
 
     async with bot:
