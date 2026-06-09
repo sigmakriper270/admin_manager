@@ -17,7 +17,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import websockets
-from websockets.server import WebSocketServerProtocol
+from websockets.asyncio.server import ServerConnection
+from websockets.http11 import Request, Response
+from websockets.datastructures import Headers
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("AdminBot")
@@ -35,18 +37,31 @@ RESPONSE_TIMEOUT = 15  # секунд ждём ответ от плагина
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Активное WS соединение с плагином (только одно)
-plugin_ws: Optional[WebSocketServerProtocol] = None
+plugin_ws: Optional[ServerConnection] = None
 
 # Ожидающие ответа: {req_id: asyncio.Future}
 pending: dict[str, asyncio.Future] = {}
 
 
+# ── Health check (перехватывает HEAD/GET от Render до WS handshake) ───────────
+async def health_check(connection: ServerConnection, request: Request) -> Optional[Response]:
+    """Отвечает 200 OK на HEAD/GET запросы — для Render health checks."""
+    if request.method in ("HEAD", "GET") and request.path in ("/", "/health"):
+        body = b"OK"
+        headers = Headers([
+            ("Content-Type", "text/plain"),
+            ("Content-Length", str(len(body))),
+        ])
+        return Response(200, "OK", headers, body)
+    return None  # продолжить WS handshake
+
+
 # ── WebSocket сервер ──────────────────────────────────────────────────────────
-async def ws_handler(ws: WebSocketServerProtocol):
+async def ws_handler(ws: ServerConnection):
     global plugin_ws
 
     # Проверка токена
-    auth = ws.request_headers.get("Authorization", "")
+    auth = ws.request.headers.get("Authorization", "")
     if auth != f"Bearer {API_TOKEN}":
         await ws.close(1008, "Unauthorized")
         log.warning("WS: отклонено соединение — неверный токен")
@@ -76,7 +91,7 @@ async def send_to_plugin(action: str, **kwargs) -> dict:
         return {"ok": False, "message": "⚠️ Плагин не подключён (сервер SCP выключен?)"}
 
     req_id = uuid.uuid4().hex[:12]
-    future: asyncio.Future = asyncio.get_event_loop().create_future()
+    future: asyncio.Future = asyncio.get_running_loop().create_future()
     pending[req_id] = future
 
     payload = {"id": req_id, "action": action, **kwargs}
@@ -177,7 +192,7 @@ async def on_ready():
 
 # ── Запуск обоих серверов вместе ──────────────────────────────────────────────
 async def main():
-    ws_server = await websockets.serve(ws_handler, "0.0.0.0", WS_PORT)
+    ws_server = await websockets.serve(ws_handler, "0.0.0.0", WS_PORT, process_request=health_check)
     log.info(f"WS сервер слушает порт {WS_PORT}")
 
     async with bot:
