@@ -180,7 +180,6 @@ async def main():
     app = web.Application()
     app.router.add_get("/ws", ws_handler)       # WebSocket endpoint
     app.router.add_get("/", health)             # health check GET
-    app.router.add_route("HEAD", "/", health)   # health check HEAD
 
     runner = web.AppRunner(app)
     await runner.setup()
