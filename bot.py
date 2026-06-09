@@ -18,8 +18,6 @@ from discord import app_commands
 from discord.ext import commands
 from aiohttp import web
 import aiohttp
-import websockets.connection
-from websockets.asyncio.server import ServerConnection
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("AdminBot")
