@@ -204,18 +204,24 @@ async def roleslist(interaction: discord.Interaction):
     if not has_permission(interaction):
         await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
         return
-    raw   = os.getenv("AVAILABLE_ROLES", "")
-    roles = [r.strip() for r in raw.split(",") if r.strip()]
-    if not roles:
+    raw = os.getenv("AVAILABLE_ROLES", "")
+    if not raw:
         await interaction.response.send_message("⚠️ AVAILABLE_ROLES не задан.", ephemeral=True)
         return
+    lines = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            role, badge = entry.split(":", 1)
+            lines.append(f"• `{role.strip()}` — {badge.strip()}")
+        else:
+            lines.append(f"• `{entry}`")
     embed = discord.Embed(
         title="📋 Доступные SCP роли",
-        description="\n".join(f"• `{r}`" for r in roles) or "—",
+        description="\n".join(lines) or "—",
         color=discord.Color.green()
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 # ── /rolesadd ─────────────────────────────────────────────────────────────────
 @bot.tree.command(name="rolesadd", description="Выдать Discord роли по SCP роли игрока", guild=guild_obj)
