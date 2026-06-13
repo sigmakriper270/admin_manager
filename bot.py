@@ -167,6 +167,32 @@ async def adminremove(interaction: discord.Interaction, steamid: str):
         await _log(interaction, f"🚫 **{interaction.user}** убрал роль у `{steamid}`")
 
 
+# ── /ban, /unban ──────────────────────────────────────────────────────────────
+@bot.tree.command(name="ban", description="Забанить игрока по Steam ID", guild=guild_obj)
+@app_commands.describe(steamid="Steam ID игрока (76561198000000000)")
+async def ban(interaction: discord.Interaction, steamid: str):
+    await interaction.response.defer(ephemeral=True)
+    if not has_permission(interaction):
+        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        return
+    data = await send_command("ban", steamid=steamid)
+    await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
+    if data["ok"]:
+        await _log(interaction, f"🚫 **{interaction.user}** забанил `{steamid}`")
+
+
+@bot.tree.command(name="unban", description="Разбанить игрока по Steam ID", guild=guild_obj)
+@app_commands.describe(steamid="Steam ID игрока (76561198000000000)")
+async def unban(interaction: discord.Interaction, steamid: str):
+    await interaction.response.defer(ephemeral=True)
+    if not has_permission(interaction):
+        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        return
+    data = await send_command("unban", steamid=steamid)
+    await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
+    if data["ok"]:
+        await _log(interaction, f"✅ **{interaction.user}** разбанил `{steamid}`")
+      
 # ── /adminlist ────────────────────────────────────────────────────────────────
 @bot.tree.command(name="adminlist", description="Список администраторов", guild=guild_obj)
 async def adminlist(interaction: discord.Interaction):
