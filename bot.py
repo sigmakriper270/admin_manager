@@ -113,11 +113,11 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 # ── Отправить команду плагину ─────────────────────────────────────────────────
-async def send_command(action: str, steamid: str = "", role: str = "", extra: str = "") -> dict:
+async def send_command(action: str, steamid: str = "", role: str = "") -> dict:
     req_id = uuid.uuid4().hex[:12]
     fut    = asyncio.get_running_loop().create_future()
     _pending[req_id] = fut
-    await _queue.put({"id": req_id, "action": action, "steamid": steamid, "role": role, "extra": extra})
+    await _queue.put({"id": req_id, "action": action, "steamid": steamid, "role": role})
     log.info(f"CMD queued: {action} {steamid} [{req_id}]")
     try:
         return await asyncio.wait_for(fut, timeout=RESPONSE_TIMEOUT)
@@ -140,8 +140,8 @@ def has_permission(interaction: discord.Interaction) -> bool:
 
 
 # ── /adminadd ─────────────────────────────────────────────────────────────────
-@bot.tree.command(name="adminadd", description="Выдать роль игроку", guild=guild_obj)
-@app_commands.describe(steamid="Steam ID (76561198000000000)", role="admin")
+@bot.tree.command(name="adminadd", description="Выдать роль игроку SCP сервера", guild=guild_obj)
+@app_commands.describe(steamid="Steam ID (76561198000000000)", role="Admin / Moderator / Helper")
 async def adminadd(interaction: discord.Interaction, steamid: str, role: str):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
@@ -154,7 +154,7 @@ async def adminadd(interaction: discord.Interaction, steamid: str, role: str):
 
 
 # ── /adminremove ──────────────────────────────────────────────────────────────
-@bot.tree.command(name="adminremove", description="Забрать роль у игрока", guild=guild_obj)
+@bot.tree.command(name="adminremove", description="Забрать роль у игрока SCP сервера", guild=guild_obj)
 @app_commands.describe(steamid="Steam ID игрока")
 async def adminremove(interaction: discord.Interaction, steamid: str):
     await interaction.response.defer(ephemeral=True)
@@ -167,41 +167,8 @@ async def adminremove(interaction: discord.Interaction, steamid: str):
         await _log(interaction, f"🚫 **{interaction.user}** убрал роль у `{steamid}`")
 
 
-# ── /ban, /unban ──────────────────────────────────────────────────────────────
-@bot.tree.command(name="ban", description="Забанить игрока", guild=guild_obj)
-@app_commands.describe(
-    steamid="Steam ID игрока (76561198000000000)",
-    days="Количество дней (0 = перманентный бан)",
-    reason="Причина бана"
-)
-async def ban(interaction: discord.Interaction, steamid: str, days: int = 7, reason: str = "Ban"):
-    await interaction.response.defer(ephemeral=True)
-    if not has_permission(interaction):
-        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
-        return
-    
-    extra = f"{days}:{reason}"
-    data = await send_command("ban", steamid=steamid, extra=extra)
-    await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
-    if data["ok"]:
-        duration = "перманентно" if days == 0 else f"на {days} дней"
-        await _log(interaction, f"🚫 **{interaction.user}** забанил `{steamid}` {duration}\n**Причина:** {reason}")
-
-@bot.tree.command(name="unban", description="Разбанить игрока", guild=guild_obj)
-@app_commands.describe(steamid="Steam ID игрока (76561198000000000)")
-async def unban(interaction: discord.Interaction, steamid: str):
-    await interaction.response.defer(ephemeral=True)
-    if not has_permission(interaction):
-        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
-        return
-    data = await send_command("unban", steamid=steamid)
-    await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
-    if data["ok"]:
-        await _log(interaction, f"✅ **{interaction.user}** разбанил `{steamid}`")
-
-      
 # ── /adminlist ────────────────────────────────────────────────────────────────
-@bot.tree.command(name="adminlist", description="Список администраторов", guild=guild_obj)
+@bot.tree.command(name="adminlist", description="Список администраторов SCP сервера", guild=guild_obj)
 async def adminlist(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
@@ -231,33 +198,8 @@ async def adminlist(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
-# ── /roleslist ────────────────────────────────────────────────────────────────
-@bot.tree.command(name="roleslist", description="Показать все доступные роли", guild=guild_obj)
-async def roleslist(interaction: discord.Interaction):
-    if not has_permission(interaction):
-        await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
-        return
-    raw = os.getenv("AVAILABLE_ROLES", "")
-    if not raw:
-        await interaction.response.send_message("⚠️ AVAILABLE_ROLES не задан.", ephemeral=True)
-        return
-    lines = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if ":" in entry:
-            role, badge = entry.split(":", 1)
-            lines.append(f"• `{role.strip()}` — {badge.strip()}")
-        else:
-            lines.append(f"• `{entry}`")
-    embed = discord.Embed(
-        title="📋 Доступные SCP роли",
-        description="\n".join(lines) or "—",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
 # ── /rolesadd ─────────────────────────────────────────────────────────────────
-@bot.tree.command(name="rolesadd", description="Выдать Discord роли по SCP:SL роли игрока", guild=guild_obj)
+@bot.tree.command(name="rolesadd", description="Выдать Discord роли по SCP роли игрока", guild=guild_obj)
 @app_commands.describe(
     steamid="Steam ID игрока (76561198000000000)",
     member="Discord пользователь которому выдать роли"
@@ -291,7 +233,7 @@ async def rolesadd(interaction: discord.Interaction, steamid: str, member: disco
 
     if scp_role is None:
         await interaction.followup.send(
-            f"❌ Игрок `{clean_steam}` не найден в списке админов сервера.",
+            f"❌ Игрок `{clean_steam}` не найден в списке админов SCP сервера.",
             ephemeral=True
         )
         return
@@ -317,7 +259,7 @@ async def rolesadd(interaction: discord.Interaction, steamid: str, member: disco
             failed.append(f"ID:{role_id} (не найдена)")
             continue
         try:
-            await member.add_roles(d_role, reason=f"AdminManager: SCP:SL роль {scp_role} / {interaction.user}")
+            await member.add_roles(d_role, reason=f"AdminManager: SCP роль {scp_role} / {interaction.user}")
             given.append(d_role.mention)
         except discord.Forbidden:
             failed.append(f"{d_role.name} (нет прав)")
@@ -340,6 +282,32 @@ async def rolesadd(interaction: discord.Interaction, steamid: str, member: disco
         )
 
 
+# ── /roleslist ────────────────────────────────────────────────────────────────
+@bot.tree.command(name="roleslist", description="Показать все доступные SCP роли", guild=guild_obj)
+async def roleslist(interaction: discord.Interaction):
+    if not has_permission(interaction):
+        await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
+        return
+    raw = os.getenv("AVAILABLE_ROLES", "")
+    if not raw:
+        await interaction.response.send_message("⚠️ AVAILABLE_ROLES не задан.", ephemeral=True)
+        return
+    lines = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            role, badge = entry.split(":", 1)
+            lines.append(f"• `{role.strip()}` — {badge.strip()}")
+        else:
+            lines.append(f"• `{entry}`")
+    embed = discord.Embed(
+        title="📋 Доступные SCP роли",
+        description="\n".join(lines) or "—",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ── /rolemap ──────────────────────────────────────────────────────────────────
 rolemap_group = app_commands.Group(
     name="rolemap",
@@ -348,7 +316,7 @@ rolemap_group = app_commands.Group(
 )
 
 
-@rolemap_group.command(name="add", description="Привязать SCP:SL роль к Discord роли")
+@rolemap_group.command(name="add", description="Привязать SCP роль к Discord роли")
 @app_commands.describe(
     scp_role="Роль в SCP (Admin, Moderator, Helper...)",
     discord_role="Discord роль которую выдавать"
@@ -376,7 +344,7 @@ async def rolemap_add(interaction: discord.Interaction, scp_role: str, discord_r
     log.info(f"rolemap add: {scp_role} → {discord_role.name} ({discord_role.id})")
 
 
-@rolemap_group.command(name="remove", description="Убрать привязку SCP:SL роли к Discord роли")
+@rolemap_group.command(name="remove", description="Убрать привязку SCP роли к Discord роли")
 @app_commands.describe(
     scp_role="Роль в SCP",
     discord_role="Discord роль которую убрать из привязки"
@@ -417,7 +385,7 @@ async def rolemap_list(interaction: discord.Interaction):
         lines.append(f"**{scp_role}** → {', '.join(mentions)}")
 
     embed = discord.Embed(
-        title="🗺 Привязки SCP:SL → Discord ролей",
+        title="🗺 Привязки SCP → Discord ролей",
         description="\n".join(lines),
         color=discord.Color.gold()
     )
