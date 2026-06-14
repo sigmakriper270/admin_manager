@@ -168,18 +168,36 @@ async def adminremove(interaction: discord.Interaction, steamid: str):
 
 
 # ── /ban, /unban ──────────────────────────────────────────────────────────────
-@bot.tree.command(name="ban", description="Забанить игрока по Steam ID", guild=guild_obj)
-@app_commands.describe(steamid="Steam ID игрока (76561198000000000)")
-async def ban(interaction: discord.Interaction, steamid: str):
+@bot.tree.command(name="ban", description="Забанить игрока", guild=guild_obj)
+@app_commands.describe(
+    steamid="Steam ID игрока (76561198000000000)",
+    days="Количество дней (0 = перманентный бан)",
+    reason="Причина бана"
+)
+async def ban(interaction: discord.Interaction, steamid: str, days: int = 7, reason: str = "Ban"):
     await interaction.response.defer(ephemeral=True)
     if not has_permission(interaction):
         await interaction.followup.send("❌ Нет прав.", ephemeral=True)
         return
-    data = await send_command("ban", steamid=steamid)
+    
+    data = await send_command("ban", steamid=steamid, role=f"{days}:{reason}")
     await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
     if data["ok"]:
-        await _log(interaction, f"🚫 **{interaction.user}** забанил `{steamid}`")
+        duration = "перманентно" if days == 0 else f"на {days} дней"
+        await _log(interaction, f"🚫 **{interaction.user}** забанил `{steamid}` {duration}\n**Причина:** {reason}")
 
+
+@bot.tree.command(name="unban", description="Разбанить игрока", guild=guild_obj)
+@app_commands.describe(steamid="Steam ID игрока (76561198000000000)")
+async def unban(interaction: discord.Interaction, steamid: str):
+    await interaction.response.defer(ephemeral=True)
+    if not has_permission(interaction):
+        await interaction.followup.send("❌ Нет прав.", ephemeral=True)
+        return
+    data = await send_command("unban", steamid=steamid)
+    await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
+    if data["ok"]:
+        await _log(interaction, f"✅ **{interaction.user}** разбанил `{steamid}`")
 
 @bot.tree.command(name="unban", description="Разбанить игрока по Steam ID", guild=guild_obj)
 @app_commands.describe(steamid="Steam ID игрока (76561198000000000)")
