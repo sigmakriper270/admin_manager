@@ -113,17 +113,17 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 # ── Отправить команду плагину ─────────────────────────────────────────────────
-async def send_command(action: str, steamid: str = "", role: str = "") -> dict:
+async def send_command(action: str, steamid: str = "", role: str = "", extra: str = "") -> dict:
     req_id = uuid.uuid4().hex[:12]
     fut    = asyncio.get_running_loop().create_future()
     _pending[req_id] = fut
-    await _queue.put({"id": req_id, "action": action, "steamid": steamid, "role": role})
+    await _queue.put({"id": req_id, "action": action, "steamid": steamid, "role": role, "extra": extra})
     log.info(f"CMD queued: {action} {steamid} [{req_id}]")
     try:
         return await asyncio.wait_for(fut, timeout=RESPONSE_TIMEOUT)
     except asyncio.TimeoutError:
         _pending.pop(req_id, None)
-        return {"ok": False, "message": "⚠️ Плагин не ответил (таймаут). Сервер SCP:SL запущен?"}
+        return {"ok": False, "message": "⚠️ Плагин не ответил (таймаут). Сервер SCP запущен?"}
 
 
 # ── Discord бот ───────────────────────────────────────────────────────────────
@@ -180,12 +180,12 @@ async def ban(interaction: discord.Interaction, steamid: str, days: int = 7, rea
         await interaction.followup.send("❌ Нет прав.", ephemeral=True)
         return
     
-    data = await send_command("ban", steamid=steamid, role=f"{days}:{reason}")
+    extra = f"{days}:{reason}"
+    data = await send_command("ban", steamid=steamid, extra=extra)
     await interaction.followup.send(f"{'✅' if data['ok'] else '❌'} {data['message']}", ephemeral=True)
     if data["ok"]:
         duration = "перманентно" if days == 0 else f"на {days} дней"
         await _log(interaction, f"🚫 **{interaction.user}** забанил `{steamid}` {duration}\n**Причина:** {reason}")
-
 
 @bot.tree.command(name="unban", description="Разбанить игрока", guild=guild_obj)
 @app_commands.describe(steamid="Steam ID игрока (76561198000000000)")
